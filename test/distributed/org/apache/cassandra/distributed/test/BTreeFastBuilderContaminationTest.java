@@ -45,11 +45,12 @@ public class BTreeFastBuilderContaminationTest extends TestBaseImpl
     private static final int NUM_PARTITIONS = 200;
     private static final int NUM_DELETE_PARTITIONS = 300;
 
-    // Reproduce CASSANDRA-21260 in-memory corruption: stale ColumnMetadata from a failed
-    // READ_REQ deserialization leaks into a Row BTree during mutation, causing ClassCastException.
-    // Source table is wide (~4200 columns) so READ_REQ exceeds 64KB → deserialized on SEPWorker.
-    // Victim table is narrow — corruption happens via BTree.updateLeaves() during mutation
-    // execution on the same SEPWorker thread (SharedExecutorPool threads hop between stages).
+    // Verify CASSANDRA-21216/CASSANDRA-21260 fix: stale ColumnMetadata from a failed
+    // READ_REQ deserialization must not leak into a Row BTree during mutation, which can
+    // cause ClassCastException. Source table is wide (~4200 columns) so READ_REQ exceeds 
+    // 64KB, meaning it is deserialized on SEPWorker. Victim table is narrow — without the 
+    // fix, corruption can happen via BTree.updateLeaves() during mutation execution on 
+    // the same SEPWorker thread (SharedExecutorPool threads hop between stages).
     @Test
     public void testSchemaDisagreementCorruptsPartitionViaFastBuilder() throws Throwable
     {
@@ -88,7 +89,7 @@ public class BTreeFastBuilderContaminationTest extends TestBaseImpl
                 catch (Exception e)
                 {
                     if (rootCauseIs(e, ClassCastException.class))
-                        return;
+                        fail("ClassCastException from corrupted partition BTree (CASSANDRA-21216): " + e.getMessage());
                 }
             }
 
@@ -102,7 +103,7 @@ public class BTreeFastBuilderContaminationTest extends TestBaseImpl
                 catch (Exception e)
                 {
                     if (rootCauseIs(e, ClassCastException.class))
-                        return;
+                        fail("ClassCastException from corrupted partition BTree (CASSANDRA-21216): " + e.getMessage());
                 }
             }
 
@@ -113,29 +114,24 @@ public class BTreeFastBuilderContaminationTest extends TestBaseImpl
             catch (Exception e)
             {
                 if (rootCauseIs(e, ClassCastException.class))
-                    return;
+                    fail("ClassCastException from corrupted partition BTree (CASSANDRA-21216): " + e.getMessage());
             }
-
-            fail("Expected ClassCastException from corrupted partition BTree (CASSANDRA-21216). "
-                 + "The poisoned SEPWorker thread was not reused for mutations in this run. "
-                 + "This test is probabilistic; re-run or increase NUM_PARTITIONS.");
         }
         catch (ShutdownException e)
         {
-            // The ClassCastException may surface as an uncaught exception on a SEPWorker thread
-            // during cluster shutdown rather than propagating through the coordinator. The dtest
-            // framework collects these and wraps them in ShutdownException.
             if (rootCauseIs(e, ClassCastException.class))
-                return;
+                fail("ClassCastException from corrupted partition BTree during shutdown (CASSANDRA-21216): " + e.getMessage());
             throw e;
         }
     }
 
-    // Reproduce SSTable header contamination via small messages on Netty event loop.
+    // Verify CASSANDRA-21260 fix: SSTable header must not be contaminated via small messages
+    // on the Netty event loop.
     // Source: 150 columns (>31 → FastBuilder overflow) but only ~3KB → small message.
     // Victim: 2000 columns, but partition DELETE has empty updatedColumns → tiny message.
-    // Both deserialized on the same Netty event loop thread (channel-to-EventLoop binding),
-    // so the poisoned FastBuilder is reused for the victim's SerializationHeader deserialization.
+    // Both deserialized on the same Netty event loop thread (channel-to-EventLoop binding).
+    // Without the fix, the poisoned FastBuilder is reused for the victim's SerializationHeader
+    // deserialization.
     @Test
     public void testSmallMessageContaminatesSSTableHeaderViaNettyEventLoop() throws Throwable
     {
@@ -207,11 +203,8 @@ public class BTreeFastBuilderContaminationTest extends TestBaseImpl
             });
 
             if (!foreignColumns.isEmpty())
-                return;
-
-            fail("Expected SSTable header contamination (foreign columns from 150-col source table "
-                 + "in victim's SSTable via Netty event loop thread reuse). "
-                 + "This test is probabilistic; re-run or increase NUM_DELETE_PARTITIONS.");
+                fail("SSTable header contamination detected (CASSANDRA-21260): foreign columns "
+                     + "found in victim's SSTable header: " + foreignColumns);
         }
     }
 
